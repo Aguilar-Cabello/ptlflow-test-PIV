@@ -36,6 +36,7 @@ from ptlflow.data.datasets import (
     SpringDataset,
     TartanAirDataset,
     ViperDataset,
+    PIVDataset,
 )
 from ptlflow.utils.utils import make_divisible
 
@@ -53,6 +54,7 @@ class FlowDataModule(pl.LightningDataModule):
         train_transform_cuda: bool = False,
         train_transform_fp16: bool = False,
         autoflow_root_dir: Optional[str] = None,
+        piv_root_dir: Optional[str] = None,
         flying_chairs_root_dir: Optional[str] = None,
         flying_chairs2_root_dir: Optional[str] = None,
         flying_things3d_root_dir: Optional[str] = None,
@@ -80,6 +82,7 @@ class FlowDataModule(pl.LightningDataModule):
         self.train_transform_fp16 = train_transform_fp16
 
         self.autoflow_root_dir = autoflow_root_dir
+        self.piv_root_dir = piv_root_dir
         self.flying_chairs_root_dir = flying_chairs_root_dir
         self.flying_chairs2_root_dir = flying_chairs2_root_dir
         self.flying_things3d_root_dir = flying_things3d_root_dir
@@ -373,6 +376,66 @@ class FlowDataModule(pl.LightningDataModule):
             self.autoflow_root_dir, split=split, transform=transform
         )
         return dataset
+    def _get_piv_dataset(self, is_train: bool, *args: str) -> Dataset:
+        device = "cuda" if self.train_transform_cuda else "cpu"
+        md = make_divisible
+
+        fbocc_transform = False
+        split = "trainval"
+        for v in args:
+            if v in ["train", "val", "trainval"]:
+                split = args[0]
+            elif v == "fbocc":
+                fbocc_transform = True
+            else:
+                raise ValueError(f"Invalid arg: {v}")
+
+        if is_train:
+            if self.train_crop_size is None:
+                cy, cx = (
+                    md(368, self._get_model_output_stride()),
+                    md(496, self._get_model_output_stride()),
+                )
+                self.train_crop_size = (cy, cx)
+                logger.warning(
+                    "--train_crop_size is not set. It will be set as ({}, {}).", cy, cx
+                )
+            else:
+                cy, cx = (
+                    md(self.train_crop_size[0], self._get_model_output_stride()),
+                    md(self.train_crop_size[1], self._get_model_output_stride()),
+                )
+
+            # These transforms are based on RAFT: https://github.com/princeton-vl/RAFT
+            transform = ft.Compose(
+                [
+                    ft.ToTensor(device=device, fp16=self.train_transform_fp16),
+                    ft.RandomScaleAndCrop(
+                        (cy, cx),
+                        (-0.1, 1.0),
+                        (-0.2, 0.2),
+                    ),
+                    ft.ColorJitter(0.4, 0.4, 0.4, 0.5 / 3.14, 0.2),
+                    ft.GaussianNoise(0.02),
+                    ft.RandomPatchEraser(
+                        0.5, (int(1), int(3)), (int(50), int(100)), "mean"
+                    ),
+                    ft.RandomFlip(min(0.5, 0.5), min(0.1, 0.5)),
+                    (
+                        ft.GenerateFBCheckFlowOcclusion(threshold=1)
+                        if fbocc_transform
+                        else None
+                    ),
+                ]
+            )
+        else:
+            transform = ft.ToTensor()
+
+        dataset = PIVDataset(
+            self.piv_root_dir, split=split, transform=transform
+        )
+        return dataset
+
 
     def _get_chairs_dataset(self, is_train: bool, *args: str) -> Dataset:
         device = "cuda" if self.train_transform_cuda else "cpu"
