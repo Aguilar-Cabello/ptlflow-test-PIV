@@ -2691,46 +2691,32 @@ class PIVDataset(BaseFlowDataset):
             get_meta=get_meta,
         )
         self.root_dir = root_dir
-        self.split_file = THIS_DIR / "piv_val.txt"
+        root_path = Path(root_dir)
 
-        # Read data from disk
-        img1_paths = sorted((Path(self.root_dir) / "data").glob("*img1.png"))
-        img2_paths = sorted((Path(self.root_dir) / "data").glob("*img2.png"))
-        flow_paths = sorted((Path(self.root_dir) / "data").glob("*flow.flo"))
-
-        # Sanity check
-        assert len(img1_paths) == len(
-            img2_paths
-        ), f"{len(img1_paths)} vs {len(img2_paths)}"
-        assert len(img1_paths) == len(
-            flow_paths
-        ), f"{len(img1_paths)} vs {len(flow_paths)}"
-
-        with open(self.split_file, "r") as f:
-            val_names = f.read().strip().splitlines()
+        def _load_subdir(subdir):
+            img1 = sorted((root_path / subdir).glob("*img1.png"))
+            img2 = sorted((root_path / subdir).glob("*img2.png"))
+            flow = sorted((root_path / subdir).glob("*flow.flo"))
+            assert len(img1) == len(img2), f"{subdir}: {len(img1)} img1 vs {len(img2)} img2"
+            assert len(img1) == len(flow), f"{subdir}: {len(img1)} img1 vs {len(flow)} flow"
+            return img1, img2, flow
 
         if split == "trainval":
-            remove_names = []
+            img1_train, img2_train, flow_train = _load_subdir("train")
+            img1_val, img2_val, flow_val = _load_subdir("validation")
+            img1_paths = img1_train + img1_val
+            img2_paths = img2_train + img2_val
+            flow_paths = flow_train + flow_val
+            is_val_flags = [False] * len(img1_train) + [True] * len(img1_val)
         elif split == "train":
-            remove_names = val_names
+            img1_paths, img2_paths, flow_paths = _load_subdir("train")
+            is_val_flags = [False] * len(img1_paths)
         elif split == "val":
-            remove_names = [
-                p.stem.split("_")[0]
-                for p in img1_paths
-                if p.stem.split("_")[0] not in val_names
-            ]
+            img1_paths, img2_paths, flow_paths = _load_subdir("validation")
+            is_val_flags = [True] * len(img1_paths)
 
-        # Keep only data from the correct split
-        self.img_paths = [
-            [img1_paths[i], img2_paths[i]]
-            for i in range(len(img1_paths))
-            if img1_paths[i].stem.split("_")[0] not in remove_names
-        ]
-        self.flow_paths = [
-            [flow_paths[i]]
-            for i in range(len(flow_paths))
-            if flow_paths[i].stem.split("_")[0] not in remove_names
-        ]
+        self.img_paths = [[img1_paths[i], img2_paths[i]] for i in range(len(img1_paths))]
+        self.flow_paths = [[flow_paths[i]] for i in range(len(flow_paths))]
         assert len(self.img_paths) == len(
             self.flow_paths
         ), f"{len(self.img_paths)} vs {len(self.flow_paths)}"
@@ -2738,11 +2724,11 @@ class PIVDataset(BaseFlowDataset):
         self.metadata = [
             {
                 "image_paths": [str(p) for p in paths],
-                "is_val": paths[0].stem in val_names,
+                "is_val": is_val_flags[i],
                 "misc": "",
                 "is_seq_start": True,
             }
-            for paths in self.img_paths
+            for i, paths in enumerate(self.img_paths)
         ]
 
         self._log_status()
