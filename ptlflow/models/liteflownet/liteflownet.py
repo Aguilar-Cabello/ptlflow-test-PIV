@@ -249,20 +249,36 @@ class Regularization(nn.Module):
 
 
 class LiteFlowNetLoss(nn.Module):
-    def __init__(self, max_flow: float = 400.0):
+    # Weights from coarsest (level 0) to finest (level 4), matching the
+    # original LiteFlowNet training schedule.
+    _level_weights = [0.005, 0.01, 0.02, 0.08, 0.32]
+
+    def __init__(self, div_flow: float = 20.0, max_flow: float = 400.0):
         super().__init__()
+        self.div_flow = div_flow
         self.max_flow = max_flow
 
     def forward(self, outputs, inputs):
-        pred = outputs["flows"][:, 0]
-        gt = inputs["flows"][:, 0]
-        valid = inputs["valids"][:, 0]
+        flow_preds = outputs["flow_preds"]  # list of 5, coarsest to finest
+        gt = inputs["flows"][:, 0]          # [B, 2, H, W], full-res pixels
+        valid = inputs["valids"][:, 0]      # [B, 1, H, W]
 
         mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
         mask = (valid >= 0.5) & (mag < self.max_flow)
 
-        epe = torch.norm(pred - gt, p=2, dim=1, keepdim=True)
-        loss = (mask * epe).mean()
+        # flow_preds[i] * div_flow == full-res pixel displacement at every
+        # level, so upsampling to GT size and comparing directly is correct.
+        loss = gt.new_zeros(1).squeeze()
+        for pred, w in zip(flow_preds, self._level_weights):
+            pred_full = F.interpolate(
+                pred * self.div_flow,
+                size=gt.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            epe = torch.norm(pred_full - gt, p=2, dim=1, keepdim=True)
+            loss = loss + w * (mask * epe).mean()
+
         return loss
 
 
@@ -280,7 +296,7 @@ class LiteFlowNet(BaseModel):
         **kwargs,
     ):
         super(LiteFlowNet, self).__init__(
-            loss_fn=LiteFlowNetLoss(max_flow),
+            loss_fn=LiteFlowNetLoss(div_flow, max_flow),
             output_stride=32,
             **kwargs,
         )
