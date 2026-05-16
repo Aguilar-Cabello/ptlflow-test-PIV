@@ -261,7 +261,8 @@ class LiteFlowNetLoss(nn.Module):
         mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
         mask = (valid >= 0.5) & (mag < self.max_flow)
 
-        loss = (mask * (pred - gt).abs()).mean()
+        epe = torch.norm(pred - gt, p=2, dim=1, keepdim=True)
+        loss = (mask * epe).mean()
         return loss
 
 
