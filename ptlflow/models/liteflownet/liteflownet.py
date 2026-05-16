@@ -218,7 +218,7 @@ class Regularization(nn.Module):
             images[:, 1], flow, images.shape[-2], images.shape[-1], 1.0 / self.mult
         )
         img_diff_norm = torch.norm(
-            images[:, 0] - img2_warped[:, 1], p=2, dim=1, keepdim=True
+            images[:, 0] - img2_warped, p=2, dim=1, keepdim=True
         )
 
         flow_mean = flow.view(*flow.shape[:2], -1).mean(dim=-1)[..., None, None]
@@ -248,6 +248,23 @@ class Regularization(nn.Module):
         return flow
 
 
+class LiteFlowNetLoss(nn.Module):
+    def __init__(self, max_flow: float = 400.0):
+        super().__init__()
+        self.max_flow = max_flow
+
+    def forward(self, outputs, inputs):
+        pred = outputs["flows"][:, 0]
+        gt = inputs["flows"][:, 0]
+        valid = inputs["valids"][:, 0]
+
+        mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
+        mask = (valid >= 0.5) & (mag < self.max_flow)
+
+        loss = (mask * (pred - gt).abs()).mean()
+        return loss
+
+
 class LiteFlowNet(BaseModel):
     pretrained_checkpoints = {
         "kitti": "https://github.com/hmorimitsu/ptlflow/releases/download/weights1/liteflownet-kitti-49f1991a.ckpt",
@@ -258,10 +275,11 @@ class LiteFlowNet(BaseModel):
     def __init__(
         self,
         div_flow: float = 20.0,
+        max_flow: float = 400.0,
         **kwargs,
     ):
         super(LiteFlowNet, self).__init__(
-            loss_fn=None,
+            loss_fn=LiteFlowNetLoss(max_flow),
             output_stride=32,
             **kwargs,
         )
