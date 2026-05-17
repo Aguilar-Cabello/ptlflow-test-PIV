@@ -15,6 +15,36 @@ from .warp import WarpingLayer
 from ..base_model.base_model import BaseModel
 
 
+class LiteFlowNet2Loss(nn.Module):
+    _level_weights = [0.01, 0.02, 0.08, 0.32]
+
+    def __init__(self, div_flow: float = 20.0, max_flow: float = 400.0):
+        super().__init__()
+        self.div_flow = div_flow
+        self.max_flow = max_flow
+
+    def forward(self, outputs, inputs):
+        flow_preds = outputs["flow_preds"]
+        gt = inputs["flows"][:, 0]
+        valid = inputs["valids"][:, 0]
+
+        mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
+        mask = (valid >= 0.5) & (mag < self.max_flow)
+
+        loss = gt.new_zeros(1).squeeze()
+        for pred, w in zip(flow_preds, self._level_weights):
+            pred_full = F.interpolate(
+                pred * self.div_flow,
+                size=gt.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+            epe = torch.norm(pred_full - gt, p=2, dim=1, keepdim=True)
+            loss = loss + w * (mask * epe).mean()
+
+        return loss
+
+
 class FeatureExtractor(nn.Module):
     def __init__(self):
         super(FeatureExtractor, self).__init__()
@@ -325,7 +355,7 @@ class LiteFlowNet2(BaseModel):
         **kwargs,
     ):
         super(LiteFlowNet2, self).__init__(
-            loss_fn=None,
+            loss_fn=LiteFlowNet2Loss(div_flow),
             output_stride=32,
             **kwargs,
         )
