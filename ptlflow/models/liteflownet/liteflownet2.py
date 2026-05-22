@@ -16,21 +16,37 @@ from ..base_model.base_model import BaseModel
 
 
 class LiteFlowNet2Loss(nn.Module):
+    # Weights for pyramid levels coarsest→finest.
     _level_weights = [0.01, 0.02, 0.08, 0.32]
+    # Weight for the final output (after the learned up_flow upsampler).
+    # Must be > 0 so that up_flow receives gradients and actually trains.
+    _final_weight = 1.0
 
-    def __init__(self, div_flow: float = 20.0, max_flow: float = 400.0):
+    def __init__(
+        self, div_flow: float = 20.0, max_flow: float = 400.0, eps: float = 0.01
+    ):
         super().__init__()
         self.div_flow = div_flow
         self.max_flow = max_flow
+        # Charbonnier epsilon: prevents gradient blow-up when error → 0.
+        # sqrt(||e||^2 + eps^2) approaches ||e|| for large errors and eps for
+        # zero error, keeping the gradient bounded at all times.
+        self.eps = eps
+
+    def _charbonnier(self, diff: torch.Tensor) -> torch.Tensor:
+        """Per-pixel Charbonnier penalty: sqrt(sum(diff^2, dim=1) + eps^2)."""
+        return torch.sqrt((diff**2).sum(dim=1, keepdim=True) + self.eps**2)
 
     def forward(self, outputs, inputs):
         flow_preds = outputs["flow_preds"]
-        gt = inputs["flows"][:, 0]
-        valid = inputs["valids"][:, 0]
+        gt = inputs["flows"][:, 0]        # [B, 2, H, W] full-res pixels
+        valid = inputs["valids"][:, 0]    # [B, 1, H, W]
 
         mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
         mask = (valid >= 0.5) & (mag < self.max_flow)
 
+        # Pyramid-level terms: each flow_pred * div_flow gives full-res pixel
+        # displacement (see mult derivation in Matching/SubPixel/Regularization).
         loss = gt.new_zeros(1).squeeze()
         for pred, w in zip(flow_preds, self._level_weights):
             pred_full = F.interpolate(
@@ -39,8 +55,17 @@ class LiteFlowNet2Loss(nn.Module):
                 mode="bilinear",
                 align_corners=False,
             )
-            epe = torch.norm(pred_full - gt, p=2, dim=1, keepdim=True)
-            loss = loss + w * (mask * epe).mean()
+            loss = loss + w * (mask * self._charbonnier(pred_full - gt)).mean()
+
+        # Final-output term: outputs["flows"][:,0] has already been scaled by
+        # div_flow and post-processed to full resolution.  Including it here is
+        # essential so that the learned up_flow ConvTranspose2d receives
+        # gradients — without this term it is completely frozen at its initial
+        # (random or pretrained) state.
+        flow_final = outputs["flows"][:, 0]  # [B, 2, H, W]
+        loss = loss + self._final_weight * (
+            mask * self._charbonnier(flow_final - gt)
+        ).mean()
 
         return loss
 
