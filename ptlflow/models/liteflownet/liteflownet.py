@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ptlflow.utils.registry import register_model
+from ptlflow.utils.gradient_loss import flow_gradients, erode_mask, flow_gradient_loss
 from .warp import WarpingLayer
 from ..base_model.base_model import BaseModel
 
@@ -253,10 +254,19 @@ class LiteFlowNetLoss(nn.Module):
     # original LiteFlowNet training schedule.
     _level_weights = [0.005, 0.01, 0.02, 0.08, 0.32]
 
-    def __init__(self, div_flow: float = 20.0, max_flow: float = 400.0):
+    def __init__(
+        self,
+        div_flow: float = 20.0,
+        max_flow: float = 400.0,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
+    ):
         super().__init__()
         self.div_flow = div_flow
         self.max_flow = max_flow
+        # Sobolev / gradient-domain term (0 disables); see utils.gradient_loss.
+        self.grad_lambda = grad_lambda
+        self.grad_mode = grad_mode
 
     def forward(self, outputs, inputs):
         flow_preds = outputs["flow_preds"]  # list of 5, coarsest to finest
@@ -265,6 +275,11 @@ class LiteFlowNetLoss(nn.Module):
 
         mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
         mask = (valid >= 0.5) & (mag < self.max_flow)
+
+        use_grad = self.grad_lambda > 0
+        if use_grad:
+            gt_grads = flow_gradients(gt)
+            grad_mask = erode_mask(mask)
 
         # flow_preds[i] * div_flow == full-res pixel displacement at every
         # level, so upsampling to GT size and comparing directly is correct.
@@ -278,6 +293,10 @@ class LiteFlowNetLoss(nn.Module):
             )
             epe = torch.norm(pred_full - gt, p=2, dim=1, keepdim=True)
             loss = loss + w * (mask * epe).mean()
+            if use_grad:
+                loss = loss + w * self.grad_lambda * flow_gradient_loss(
+                    pred_full, gt_grads, grad_mask, self.grad_mode
+                )
 
         return loss
 
@@ -293,15 +312,19 @@ class LiteFlowNet(BaseModel):
         self,
         div_flow: float = 20.0,
         max_flow: float = 400.0,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
         **kwargs,
     ):
         super(LiteFlowNet, self).__init__(
-            loss_fn=LiteFlowNetLoss(div_flow, max_flow),
+            loss_fn=LiteFlowNetLoss(div_flow, max_flow, grad_lambda, grad_mode),
             output_stride=32,
             **kwargs,
         )
 
         self.div_flow = div_flow
+        self.grad_lambda = grad_lambda
+        self.grad_mode = grad_mode
         self.num_levels = 5
 
         self.feature_net = FeatureExtractor()

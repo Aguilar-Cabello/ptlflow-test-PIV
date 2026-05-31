@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ptlflow.utils.registry import register_model
+from ptlflow.utils.gradient_loss import flow_gradients, erode_mask, flow_gradient_loss
 from .warp import WarpingLayer
 from ..base_model.base_model import BaseModel
 
@@ -23,11 +24,19 @@ class LiteFlowNet2Loss(nn.Module):
     _final_weight = 1.0
 
     def __init__(
-        self, div_flow: float = 20.0, max_flow: float = 400.0, eps: float = 0.01
+        self,
+        div_flow: float = 20.0,
+        max_flow: float = 400.0,
+        eps: float = 0.01,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
     ):
         super().__init__()
         self.div_flow = div_flow
         self.max_flow = max_flow
+        # Sobolev / gradient-domain term (0 disables); see utils.gradient_loss.
+        self.grad_lambda = grad_lambda
+        self.grad_mode = grad_mode
         # Charbonnier epsilon: prevents gradient blow-up when error → 0.
         # sqrt(||e||^2 + eps^2) approaches ||e|| for large errors and eps for
         # zero error, keeping the gradient bounded at all times.
@@ -45,6 +54,11 @@ class LiteFlowNet2Loss(nn.Module):
         mag = torch.sum(gt**2, dim=1, keepdim=True).sqrt()
         mask = (valid >= 0.5) & (mag < self.max_flow)
 
+        use_grad = self.grad_lambda > 0
+        if use_grad:
+            gt_grads = flow_gradients(gt)
+            grad_mask = erode_mask(mask)
+
         # Pyramid-level terms: each flow_pred * div_flow gives full-res pixel
         # displacement (see mult derivation in Matching/SubPixel/Regularization).
         loss = gt.new_zeros(1).squeeze()
@@ -56,6 +70,10 @@ class LiteFlowNet2Loss(nn.Module):
                 align_corners=False,
             )
             loss = loss + w * (mask * self._charbonnier(pred_full - gt)).mean()
+            if use_grad:
+                loss = loss + w * self.grad_lambda * flow_gradient_loss(
+                    pred_full, gt_grads, grad_mask, self.grad_mode
+                )
 
         # Final-output term: outputs["flows"][:,0] has already been scaled by
         # div_flow and post-processed to full resolution.  Including it here is
@@ -66,6 +84,10 @@ class LiteFlowNet2Loss(nn.Module):
         loss = loss + self._final_weight * (
             mask * self._charbonnier(flow_final - gt)
         ).mean()
+        if use_grad:
+            loss = loss + self._final_weight * self.grad_lambda * flow_gradient_loss(
+                flow_final, gt_grads, grad_mask, self.grad_mode
+            )
 
         return loss
 
@@ -377,16 +399,20 @@ class LiteFlowNet2(BaseModel):
         self,
         div_flow: float = 20.0,
         use_pseudo_regularization: bool = False,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
         **kwargs,
     ):
         super(LiteFlowNet2, self).__init__(
-            loss_fn=LiteFlowNet2Loss(div_flow),
+            loss_fn=LiteFlowNet2Loss(div_flow, grad_lambda=grad_lambda, grad_mode=grad_mode),
             output_stride=32,
             **kwargs,
         )
 
         self.div_flow = div_flow
         self.use_pseudo_regularization = use_pseudo_regularization
+        self.grad_lambda = grad_lambda
+        self.grad_mode = grad_mode
 
         self.num_levels = 4
 

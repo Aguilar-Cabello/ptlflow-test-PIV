@@ -10,6 +10,7 @@ from .extractor import BasicEncoder, SmallEncoder
 from .corr import get_corr_block
 from .utils import coords_grid, upflow8
 from ..base_model.base_model import BaseModel
+from ...utils.gradient_loss import flow_gradients, erode_mask, flow_gradient_loss
 
 try:
     import alt_cuda_corr
@@ -18,10 +19,20 @@ except:
 
 
 class SequenceLoss(nn.Module):
-    def __init__(self, gamma: float, max_flow: float):
+    def __init__(
+        self,
+        gamma: float,
+        max_flow: float,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
+    ):
         super().__init__()
         self.gamma = gamma
         self.max_flow = max_flow
+        # Sobolev / gradient-domain term: weight (0 disables) and mode
+        # ('jacobian' = full velocity-gradient error, 'vorticity' = curl only).
+        self.grad_lambda = grad_lambda
+        self.grad_mode = grad_mode
 
     def forward(self, outputs, inputs):
         """Loss function defined over sequence of flow predictions"""
@@ -37,10 +48,19 @@ class SequenceLoss(nn.Module):
         mag = torch.sum(flow_gt**2, dim=1, keepdim=True).sqrt()
         valid = (valid >= 0.5) & (mag < self.max_flow)
 
+        use_grad = self.grad_lambda > 0
+        if use_grad:
+            gt_grads = flow_gradients(flow_gt)
+            grad_mask = erode_mask(valid)
+
         for i in range(n_predictions):
             i_weight = self.gamma ** (n_predictions - i - 1)
             i_loss = (flow_preds[i] - flow_gt).abs()
             flow_loss += i_weight * (valid * i_loss).mean()
+            if use_grad:
+                flow_loss += i_weight * self.grad_lambda * flow_gradient_loss(
+                    flow_preds[i], gt_grads, grad_mask, self.grad_mode
+                )
 
         return flow_loss
 
@@ -62,10 +82,14 @@ class RAFT(BaseModel):
         max_flow: float = 400,
         iters: int = 32,
         alternate_corr: bool = False,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
         **kwargs,
     ) -> None:
         super().__init__(
-            output_stride=8, loss_fn=SequenceLoss(gamma, max_flow), **kwargs
+            output_stride=8,
+            loss_fn=SequenceLoss(gamma, max_flow, grad_lambda, grad_mode),
+            **kwargs,
         )
 
         self.corr_levels = corr_levels
@@ -75,6 +99,8 @@ class RAFT(BaseModel):
         self.max_flow = max_flow
         self.iters = iters
         self.alternate_corr = alternate_corr
+        self.grad_lambda = grad_lambda
+        self.grad_mode = grad_mode
 
         self.hidden_dim = hdim = 128
         self.context_dim = cdim = 128
@@ -208,6 +234,8 @@ class RAFTSmall(RAFT):
         max_flow: float = 400,
         iters: int = 32,
         alternate_corr: bool = False,
+        grad_lambda: float = 0.0,
+        grad_mode: str = "jacobian",
         **kwargs,
     ) -> None:
         super().__init__(
@@ -218,6 +246,8 @@ class RAFTSmall(RAFT):
             max_flow=max_flow,
             iters=iters,
             alternate_corr=alternate_corr,
+            grad_lambda=grad_lambda,
+            grad_mode=grad_mode,
             **kwargs,
         )
         self.hidden_dim = hdim = 96
