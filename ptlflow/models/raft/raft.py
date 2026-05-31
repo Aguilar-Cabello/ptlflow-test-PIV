@@ -25,14 +25,17 @@ class SequenceLoss(nn.Module):
         max_flow: float,
         grad_lambda: float = 0.0,
         grad_mode: str = "jacobian",
+        grad_border: int = 8,
     ):
         super().__init__()
         self.gamma = gamma
         self.max_flow = max_flow
-        # Sobolev / gradient-domain term: weight (0 disables) and mode
-        # ('jacobian' = full velocity-gradient error, 'vorticity' = curl only).
+        # Sobolev / gradient-domain term: weight (0 disables), mode
+        # ('jacobian' = full velocity-gradient error, 'vorticity' = curl only),
+        # and grad_border = px frame excluded at the image edge (ill-posed there).
         self.grad_lambda = grad_lambda
         self.grad_mode = grad_mode
+        self.grad_border = grad_border
 
     def forward(self, outputs, inputs):
         """Loss function defined over sequence of flow predictions"""
@@ -51,7 +54,7 @@ class SequenceLoss(nn.Module):
         use_grad = self.grad_lambda > 0
         if use_grad:
             gt_grads = flow_gradients(flow_gt)
-            grad_mask = erode_mask(valid)
+            grad_mask = erode_mask(valid, self.grad_border)
 
         for i in range(n_predictions):
             i_weight = self.gamma ** (n_predictions - i - 1)
@@ -84,11 +87,12 @@ class RAFT(BaseModel):
         alternate_corr: bool = False,
         grad_lambda: float = 0.0,
         grad_mode: str = "jacobian",
+        grad_border: int = 8,
         **kwargs,
     ) -> None:
         super().__init__(
             output_stride=8,
-            loss_fn=SequenceLoss(gamma, max_flow, grad_lambda, grad_mode),
+            loss_fn=SequenceLoss(gamma, max_flow, grad_lambda, grad_mode, grad_border),
             **kwargs,
         )
 
@@ -101,6 +105,7 @@ class RAFT(BaseModel):
         self.alternate_corr = alternate_corr
         self.grad_lambda = grad_lambda
         self.grad_mode = grad_mode
+        self.grad_border = grad_border
 
         self.hidden_dim = hdim = 128
         self.context_dim = cdim = 128
@@ -236,6 +241,7 @@ class RAFTSmall(RAFT):
         alternate_corr: bool = False,
         grad_lambda: float = 0.0,
         grad_mode: str = "jacobian",
+        grad_border: int = 8,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -248,6 +254,7 @@ class RAFTSmall(RAFT):
             alternate_corr=alternate_corr,
             grad_lambda=grad_lambda,
             grad_mode=grad_mode,
+            grad_border=grad_border,
             **kwargs,
         )
         self.hidden_dim = hdim = 96

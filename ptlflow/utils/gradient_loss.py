@@ -32,14 +32,24 @@ def flow_gradients(flow):
     return fx, fy
 
 
-def erode_mask(mask):
-    """Shrink a validity mask by 1 px (morphological erosion).
+def erode_mask(mask, border=0):
+    """Shrink a validity mask for the gradient loss.
 
-    A finite-difference stencil that touches an invalid pixel is meaningless,
-    so drop any pixel that has an invalid neighbour before applying the
-    gradient loss. ``mask`` may be bool or float; returns float in {0, 1}.
+    Removes (a) any pixel with an invalid neighbour (1 px morphological erosion,
+    since a finite-difference stencil touching an invalid pixel is meaningless),
+    and (b) a ``border``-px frame around the image edge. At the edge, CNN/warp
+    padding and out-of-frame particle loss make both the prediction and the
+    GT-gradient target unreliable, so imposing a derivative target there is
+    ill-posed and produces the characteristic border "disaster" -- excluding a
+    margin removes it. ``mask`` may be bool or float; returns float in {0, 1}.
     """
-    return -F.max_pool2d(-mask.float(), kernel_size=3, stride=1, padding=1)
+    m = -F.max_pool2d(-mask.float(), kernel_size=3, stride=1, padding=1)
+    if border > 0:
+        m[..., :border, :] = 0.0
+        m[..., -border:, :] = 0.0
+        m[..., :, :border] = 0.0
+        m[..., :, -border:] = 0.0
+    return m
 
 
 def flow_gradient_loss(pred, gt_grads, mask, mode="jacobian"):

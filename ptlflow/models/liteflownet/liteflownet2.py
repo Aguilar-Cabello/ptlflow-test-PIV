@@ -30,13 +30,16 @@ class LiteFlowNet2Loss(nn.Module):
         eps: float = 0.01,
         grad_lambda: float = 0.0,
         grad_mode: str = "jacobian",
+        grad_border: int = 8,
     ):
         super().__init__()
         self.div_flow = div_flow
         self.max_flow = max_flow
-        # Sobolev / gradient-domain term (0 disables); see utils.gradient_loss.
+        # Sobolev / gradient-domain term (0 disables); grad_border = px frame
+        # excluded at the image edge (ill-posed there). See utils.gradient_loss.
         self.grad_lambda = grad_lambda
         self.grad_mode = grad_mode
+        self.grad_border = grad_border
         # Charbonnier epsilon: prevents gradient blow-up when error → 0.
         # sqrt(||e||^2 + eps^2) approaches ||e|| for large errors and eps for
         # zero error, keeping the gradient bounded at all times.
@@ -57,7 +60,7 @@ class LiteFlowNet2Loss(nn.Module):
         use_grad = self.grad_lambda > 0
         if use_grad:
             gt_grads = flow_gradients(gt)
-            grad_mask = erode_mask(mask)
+            grad_mask = erode_mask(mask, self.grad_border)
 
         # Pyramid-level terms: each flow_pred * div_flow gives full-res pixel
         # displacement (see mult derivation in Matching/SubPixel/Regularization).
@@ -401,10 +404,13 @@ class LiteFlowNet2(BaseModel):
         use_pseudo_regularization: bool = False,
         grad_lambda: float = 0.0,
         grad_mode: str = "jacobian",
+        grad_border: int = 8,
         **kwargs,
     ):
         super(LiteFlowNet2, self).__init__(
-            loss_fn=LiteFlowNet2Loss(div_flow, grad_lambda=grad_lambda, grad_mode=grad_mode),
+            loss_fn=LiteFlowNet2Loss(
+                div_flow, grad_lambda=grad_lambda, grad_mode=grad_mode, grad_border=grad_border
+            ),
             output_stride=32,
             **kwargs,
         )
@@ -413,6 +419,7 @@ class LiteFlowNet2(BaseModel):
         self.use_pseudo_regularization = use_pseudo_regularization
         self.grad_lambda = grad_lambda
         self.grad_mode = grad_mode
+        self.grad_border = grad_border
 
         self.num_levels = 4
 
